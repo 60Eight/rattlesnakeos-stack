@@ -124,7 +124,7 @@ get_latest_versions() {
   log_header ${FUNCNAME}
 
   sudo apt-get -y install jq
-  
+
   # check if running latest stack
   LATEST_STACK_VERSION=$(curl --fail -s "$STACK_URL_LATEST" | jq -r '.name')
   if [ -z "$LATEST_STACK_VERSION" ]; then
@@ -135,26 +135,26 @@ get_latest_versions() {
   else
     STACK_UPDATE_MESSAGE="WARNING: you should upgrade to the latest version: ${LATEST_STACK_VERSION}"
   fi
-  
+
   # check for latest stable chromium version
   LATEST_CHROMIUM=$(curl --fail -s "$CHROME_URL_LATEST" | jq -r '.[] | select(.os == "android") | .versions[] | select(.channel == "'$CHROME_CHANNEL'") | .current_version')
   if [ -z "$LATEST_CHROMIUM" ]; then
     aws_notify_simple "ERROR: Unable to get latest Chromium version details. Stopping build."
     exit 1
   fi
-  
-  # fdroid - get latest non alpha tags from gitlab
-  FDROID_CLIENT_VERSION=$(curl --fail -s "$FDROID_CLIENT_URL_LATEST" | jq -r '[.[] | select(.name | test("^[0-9]+\\.[0-9]+")) | select(.name | contains("alpha") | not) | select(.name | contains("ota") | not)][0] | .name')
+
+  # fdroid - get latest non alpha tags from gitlab (sorted)
+  FDROID_CLIENT_VERSION=$(curl --fail -s "$FDROID_CLIENT_URL_LATEST" | jq -r 'sort_by(.name) | reverse | [.[] | select(.name | test("^[0-9]+\\.[0-9]+")) | select(.name | contains("alpha") | not) | select(.name | contains("ota") | not)][0] | .name')
   if [ -z "$FDROID_CLIENT_VERSION" ]; then
     aws_notify_simple "ERROR: Unable to get latest F-Droid version details. Stopping build."
     exit 1
   fi
-  FDROID_PRIV_EXT_VERSION=$(curl --fail -s "$FDROID_PRIV_EXT_URL_LATEST" | jq -r '[.[] | select(.name | test("^[0-9]+\\.[0-9]+")) | select(.name | contains("alpha") | not) | select(.name | contains("ota") | not)][0] | .name')
+  FDROID_PRIV_EXT_VERSION=$(curl --fail -s "$FDROID_PRIV_EXT_URL_LATEST" | jq -r 'sort_by(.name) | reverse | [.[] | select(.name | test("^[0-9]+\\.[0-9]+")) | select(.name | contains("alpha") | not) | select(.name | contains("ota") | not)][0] | .name')
   if [ -z "$FDROID_PRIV_EXT_VERSION" ]; then
     aws_notify_simple "ERROR: Unable to get latest F-Droid privilege extension version details. Stopping build."
     exit 1
   fi
-  
+
   # attempt to automatically pick latest build version and branch. note this is likely to break with any page redesign. should also add some validation here.
   AOSP_BUILD=$(curl --fail -s ${AOSP_URL_BUILD} | grep -A1 "${DEVICE}" | egrep '[a-zA-Z]+ [0-9]{4}\)' | grep "${ANDROID_VERSION}" | tail -1 | cut -d"(" -f2 | cut -d"," -f1)
   if [ -z "$AOSP_BUILD" ]; then
@@ -207,7 +207,7 @@ check_for_new_versions() {
     needs_update=true
     BUILD_REASON="$BUILD_REASON 'Chromium version $existing_chromium != $LATEST_CHROMIUM'"
   fi
-  
+
   # check fdroid
   existing_fdroid_client=$(aws s3 cp "s3://${AWS_RELEASE_BUCKET}/fdroid/revision" - || true)
   if [ "$existing_fdroid_client" == "$FDROID_CLIENT_VERSION" ]; then
@@ -230,7 +230,7 @@ check_for_new_versions() {
 
   if [ "$needs_update" = true ]; then
     echo "New build is required"
-  else 
+  else
     if [ "$FORCE_BUILD" = true ]; then
       message="No build is required, but FORCE_BUILD=true"
       echo "$message"
@@ -284,7 +284,7 @@ get_encryption_key() {
 
   wait_time="10m"
   error_message=""
-  while [ 1 ]; do 
+  while [ 1 ]; do
     aws sns publish --region ${REGION} --topic-arn "$AWS_SNS_ARN" \
       --message="$(printf "%s Need to login to the EC2 instance and provide the encryption passphrase (${wait_time} timeout before shutdown). You may need to open up SSH in the default security group, see the FAQ for details. %s\n\nssh ubuntu@%s 'printf \"Enter encryption passphrase: \" && read k && echo \"\$k\" > %s'" "$error_message" "$additional_message" "${INSTANCE_IP}" "${ENCRYPTION_PIPE}")"
     error_message=""
@@ -311,10 +311,10 @@ get_encryption_key() {
     else
       log "Verifying encryption passphrase is valid by syncing encrypted signing keys from S3 and decrypting"
       aws s3 sync "s3://${AWS_ENCRYPTED_KEYS_BUCKET}" "${KEYS_DIR}"
-      
+
       decryption_error=false
       set +e
-      for f in $(find "${KEYS_DIR}" -type f -name '*.gpg'); do 
+      for f in $(find "${KEYS_DIR}" -type f -name '*.gpg'); do
         output_file=$(echo $f | awk -F".gpg" '{print $1}')
         log "Decrypting $f to ${output_file}..."
         gpg -d --batch --passphrase "${ENCRYPTION_KEY}" $f > $output_file
@@ -325,7 +325,7 @@ get_encryption_key() {
       done
       set -e
       if [ "$decryption_error" = true ]; then
-        log 
+        log
         error_message="ERROR: Failed to decrypt signing keys with provided passphrase - try again."
         log "$error_message"
         continue
@@ -380,6 +380,8 @@ setup_env() {
     unzip sdk-tools.zip
     yes | ./tools/bin/sdkmanager --licenses
     ./tools/android update sdk -u --use-sdk-wrapper
+    # workaround for license issue with f-droid using older sdk (didn't spend time to debug issue further)
+    yes | ./tools/bin/sdkmanager "build-tools;27.0.3" "platforms;android-27"
   fi
 
   # setup git
@@ -417,7 +419,7 @@ build_chromium() {
   fi
   export PATH="$PATH:$HOME/depot_tools"
 
-  # fetch chromium 
+  # fetch chromium
   mkdir -p $HOME/chromium
   cd $HOME/chromium
   fetch --nohooks android
@@ -433,7 +435,9 @@ build_chromium() {
 
   # run gclient sync (runhooks will run as part of this)
   log "Running gclient sync (this takes a while)"
-  yes | gclient sync --with_branch_heads --jobs 32 -RDf
+  for i in {1..5}; do
+    yes | gclient sync --with_branch_heads --jobs 32 -RDf && break
+  done
 
   # cleanup any files in tree not part of this revision
   git clean -dff
@@ -554,7 +558,6 @@ apply_patches() {
   patch_custom
   patch_aosp_removals
   patch_add_apps
-  patch_tethering
   patch_base_config
   patch_device_config
   patch_chromium_webview
@@ -566,26 +569,32 @@ apply_patches() {
 
 patch_aosp_removals() {
   log_header ${FUNCNAME}
-  cd "${BUILD_DIR}"
 
-  # remove aosp webview
-  rm -rf platform/external/chromium-webview
-  sed -i '/webview \\/d' build/make/target/product/core_minimal.mk
+  # remove aosp chromium webview directory
+  rm -rf ${BUILD_DIR}/platform/external/chromium-webview
 
-  # remove Browser2
-  sed -i '/Browser2/d' build/make/target/product/core.mk
+  # loop over all make files as these keep changing and remove components
+  for mk_file in ${BUILD_DIR}/build/make/target/product/*.mk; do
+    # remove aosp webview
+    sed -i '/webview \\/d' ${mk_file}
 
-  # remove Calendar
-  sed -i '/Calendar \\/d' build/make/target/product/core.mk
+    # remove Browser2
+    sed -i '/Browser2/d' ${mk_file}
 
-  # remove QuickSearchBox
-  sed -i '/QuickSearchBox/d' build/make/target/product/core.mk
+    # remove Calendar
+    sed -i '/Calendar \\/d' ${mk_file}
+    sed -i '/Calendar.apk/d' ${mk_file}
+
+    # remove QuickSearchBox
+    sed -i '/QuickSearchBox/d' ${mk_file}
+  done
+
 }
 
 # TODO: most of this is fragile and unforgiving
 patch_custom() {
   log_header ${FUNCNAME}
-  
+
   cd $BUILD_DIR
 
   # allow custom patches to be applied
@@ -619,8 +628,8 @@ patch_custom() {
     log "Putting custom prebuilts from <% $r.Repo %> in build tree location ${prebuilt_dir}/<% $i %>"
     retry git clone <% $r.Repo %> ${prebuilt_dir}/<% $i %>
     <% range .Modules %>
-      log "Adding custom PRODUCT_PACKAGES += <% . %> to ${BUILD_DIR}/build/make/target/product/core.mk"
-      sed -i "\$aPRODUCT_PACKAGES += <% . %>" ${BUILD_DIR}/build/make/target/product/core.mk
+      log "Adding custom PRODUCT_PACKAGES += <% . %> to $(get_package_mk_file)"
+      sed -i "\$aPRODUCT_PACKAGES += <% . %>" $(get_package_mk_file)
     <% end %>
   <% end %>
   <% end %>
@@ -684,28 +693,36 @@ patch_fdroid() {
   popd
 }
 
+get_package_mk_file() {
+  # this is newer location in master
+  mk_file=${BUILD_DIR}/build/make/target/product/handheld_system.mk
+  if [ ! -f ${mk_file} ]; then
+    # this is older location
+    mk_file=${BUILD_DIR}/build/make/target/product/core.mk
+    if [ ! -f ${mk_file} ]; then
+      log "Expected handheld_system.mk or core.mk do not exist"
+      exit 1
+    fi
+  fi
+  echo ${mk_file}
+}
+
 patch_add_apps() {
   log_header ${FUNCNAME}
 
-  sed -i "\$aPRODUCT_PACKAGES += Updater" ${BUILD_DIR}/build/make/target/product/core.mk
-  sed -i "\$aPRODUCT_PACKAGES += F-DroidPrivilegedExtension" ${BUILD_DIR}/build/make/target/product/core.mk
-  sed -i "\$aPRODUCT_PACKAGES += F-Droid" ${BUILD_DIR}/build/make/target/product/core.mk
-  sed -i "\$aPRODUCT_PACKAGES += chromium" ${BUILD_DIR}/build/make/target/product/core.mk
+  mk_file=$(get_package_mk_file)
+  sed -i "\$aPRODUCT_PACKAGES += Updater" ${mk_file}
+  sed -i "\$aPRODUCT_PACKAGES += F-DroidPrivilegedExtension" ${mk_file}
+  sed -i "\$aPRODUCT_PACKAGES += F-Droid" ${mk_file}
+  sed -i "\$aPRODUCT_PACKAGES += chromium" ${mk_file}
 
   # add any modules defined in custom manifest projects
   <% if .CustomManifestProjects %><% range $i, $r := .CustomManifestProjects %><% range $j, $q := .Modules %>
-  log "Adding custom PRODUCT_PACKAGES += <% $q %> to ${BUILD_DIR}/build/make/target/product/core.mk"
-  sed -i "\$aPRODUCT_PACKAGES += <% $q %>" ${BUILD_DIR}/build/make/target/product/core.mk
+  log "Adding custom PRODUCT_PACKAGES += <% $q %> to ${mk_file}"
+  sed -i "\$aPRODUCT_PACKAGES += <% $q %>" ${mk_file}
   <% end %>
   <% end %>
   <% end %>
-}
-
-patch_tethering() {
-  # TODO: probably could do these edits in a cleaner way
-  sed -i "\$aPRODUCT_PROPERTY_OVERRIDES += net.tethering.noprovisioning=true" ${BUILD_DIR}/build/make/target/product/core.mk
-  awk -i inplace '1;/def_vibrate_when_ringing/{print "    <integer name=\"def_tether_dun_required\">0</integer>";}' ${BUILD_DIR}/frameworks/base/packages/SettingsProvider/res/values/defaults.xml
-  awk -i inplace '1;/loadSetting\(stmt, Settings.Global.PREFERRED_NETWORK_MODE/{print "            loadSetting(stmt, Settings.Global.TETHER_DUN_REQUIRED, R.integer.def_tether_dun_required);";}' ${BUILD_DIR}/frameworks/base/packages/SettingsProvider/src/com/android/providers/settings/DatabaseHelper.java
 }
 
 patch_updater() {
@@ -729,7 +746,7 @@ patch_priv_ext() {
   unofficial_platform_hash=$(fdpe_hash "${KEYS_DIR}/${DEVICE}/platform.x509.pem")
   sed -i 's/'${OFFICIAL_FDROID_KEY}'")/'${unofficial_releasekey_hash}'"),\n            new Pair<>("org.fdroid.fdroid", "'${unofficial_platform_hash}'")/' \
       "${BUILD_DIR}/packages/apps/F-DroidPrivilegedExtension/app/src/main/java/org/fdroid/fdroid/privileged/ClientWhitelist.java"
-} 
+}
 
 patch_launcher() {
   log_header ${FUNCNAME}
@@ -855,15 +872,15 @@ release() {
   build/tools/releasetools/sign_target_files_apks -o -d "$KEY_DIR" "${AVB_SWITCHES[@]}" \
     out/target/product/$DEVICE/obj/PACKAGING/target_files_intermediates/$PREFIX$DEVICE-target_files-$BUILD_NUMBER.zip \
     $OUT/$TARGET_FILES
-  
+
   log "Running ota_from_target_files"
   build/tools/releasetools/ota_from_target_files --block -k "$KEY_DIR/releasekey" "${EXTRA_OTA[@]}" $OUT/$TARGET_FILES \
       $OUT/$DEVICE-ota_update-$BUILD.zip
-  
+
   log "Running img_from_target_files"
   sed -i 's/zipfile\.ZIP_DEFLATED/zipfile\.ZIP_STORED/' build/tools/releasetools/img_from_target_files.py
   build/tools/releasetools/img_from_target_files $OUT/$TARGET_FILES $OUT/$DEVICE-img-$BUILD.zip
-  
+
   log "Running generate-factory-images"
   cd $OUT
   sed -i 's/zip -r/tar cvf/' ../../device/common/generate-factory-images-common.sh
@@ -963,14 +980,14 @@ aws_import_keys() {
     if [ "$(aws s3 ls "s3://${AWS_ENCRYPTED_KEYS_BUCKET}/${DEVICE}" | wc -l)" == '0' ]; then
       log "No encrypted keys were found - generating encrypted keys"
       gen_keys
-      for f in $(find "${KEYS_DIR}" -type f); do 
+      for f in $(find "${KEYS_DIR}" -type f); do
         log "Encrypting file ${f} to ${f}.gpg"
         gpg --symmetric --batch --passphrase "$ENCRYPTION_KEY" --cipher-algo AES256 $f
       done
       log "Syncing encrypted keys to S3 s3://${AWS_ENCRYPTED_KEYS_BUCKET}"
       aws s3 sync "${KEYS_DIR}" "s3://${AWS_ENCRYPTED_KEYS_BUCKET}" --exclude "*" --include "*.gpg"
     fi
-  else 
+  else
     if [ "$(aws s3 ls "s3://${AWS_KEYS_BUCKET}/${DEVICE}" | wc -l)" == '0' ]; then
       log "No keys were found - generating keys"
       gen_keys
@@ -979,7 +996,7 @@ aws_import_keys() {
     else
       log "Keys already exist for ${DEVICE} - syncing them from S3"
       aws s3 sync "s3://${AWS_KEYS_BUCKET}" "${KEYS_DIR}"
-    fi 
+    fi
   fi
 }
 
